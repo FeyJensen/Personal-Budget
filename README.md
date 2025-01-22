@@ -18,5 +18,6 @@ git clone https://github.com/FeyJensen/Personal-Budget.git
 ```
 ## Usage
 To run the project, use the following command:
-```node index.js
+```
+node index.js
 ```
