@@ -2,23 +2,46 @@ const express = require('express')
 const app = express()
 const { Envelope } = require('./envelopeObject.js');
 let bodyParser = require('body-parser');
+require('dotenv').config();
+const { Pool } = require('pg');
+const { env } = require('process');
+//console.log(process.env);
 
-let envelopeArr = []
+const pool = new Pool({
+  user: process.env.DB_USER,
+  host: process.env.DB_HOST,
+  database: process.env.DB_NAME,
+  password: process.env.DB_PASSWORD,
+  port: process.env.DB_PORT,
+});
 
-app.get('/', (req, res) => {
-  res.send(envelopeArr)
+//get all envelopes
+app.get('/', async(req, res) => {
+  const results = await pool.query('SELECT * FROM envelopes');
+  console.table(results.rows);
+  if (results.rows.length === 0) {
+    res.status(400).send('Not Found');
+    return;
+  }
+  if(results) {
+    res.send({'rows':results.rows});
+  }
+  else {
+    res.status(400).send('Not Found');
+  }
 })
 
+
 //get one by id
-app.get('/:id', (req, res) => {
-  //go through array and find the one with the matching id
-  let itemRequestedFound = envelopeArr.find((element) => {
-    if (element.id === Number(req.params.id)) {
-      return element
-    }
-  })
-  if (itemRequestedFound) {
-    res.send(itemRequestedFound);
+app.get('/:id', async(req, res) => {
+  const resultsFound = await pool.query('SELECT * FROM envelopes WHERE id = $1', [req.params.id]);
+  console.table(resultsFound.rows);
+  if (resultsFound.rows.length === 0) {
+    res.status(400).send('Not Found');
+    return;
+  }
+  if(resultsFound) {
+  res.send({'rows':resultsFound.rows});
   }
   else {
     res.status(400).send('Not Found');
@@ -26,71 +49,79 @@ app.get('/:id', (req, res) => {
 })
 
 //creates envelope
-let id = 0;
-app.post('/envelopes', bodyParser.json(), (req, res) => {
-  id = id + 1;
-  let newEnvelope = new Envelope(req.body.name, req.body.budget, id);
-  if (newEnvelope) {
-    envelopeArr.push(newEnvelope);
-    res.status(201).send('Envelope Added')
+app.post('/envelopes', bodyParser.json(), async(req, res) => {
+  const validQuery = await pool.query('INSERT INTO envelopes (name, balance) VALUES ($1, $2) RETURNING *', [req.body.name, req.body.balance]);
+  console.table(validQuery.rows);
+
+  if(validQuery) {
+    res.status(201).send('Envelope Added');
+
   }
   else {
-    res.status(400).send();
+    res.status(400).send('Invalid Entry');
   }
+  
 });
 
-app.post('/envelopes/transfer/:from/:to', bodyParser.json(), (req, res) => {
-  let envelopeFrom = envelopeArr.find((element) => element.name === req.params.from)
-  let envelopeTo = envelopeArr.find((element) => element.name === req.params.to)
-  let amount = req.body.amount;
-  //only take money out if there is enough
-  if ((envelopeFrom.budget - amount) >= 0) {
-    envelopeFrom.budget = envelopeFrom.budget - amount;
-    envelopeTo.budget = envelopeTo.budget + amount;
-    res.status(201).send('Budget updated');
+//transfer money from one envelope to another
+app.post('/envelopes/transfer', bodyParser.json(), async(req, res) => {
+  const { from, to, amount } = req.body;
+  if (from === to) {
+    res.status(400).send('Cannot transfer money to the same envelope');
+    return;
+  }
+  const envelopeFromQuery = await pool.query('SELECT * FROM envelopes WHERE name = $1', [from]);
+  const envelopeToQuery = await pool.query('SELECT * FROM envelopes WHERE name = $1', [to]);
+  if(envelopeFromQuery.rowCount > 0 && envelopeToQuery.rowCount > 0) {
+    if (envelopeFromQuery.rows[0].balance < amount) {
+      res.status(409).send('Not enough money in the envelope');
+      return;
+    }
+  
+  const envelopeFromQueryAmount = envelopeFromQuery.rows[0].balance - amount;
+  const envelopeToQueryAmount = envelopeToQuery.rows[0].balance + amount;
+
+    await pool.query('UPDATE envelopes SET balance = $1 WHERE name = $2', [envelopeFromQueryAmount, from])
+    await pool.query('UPDATE envelopes SET balance = $1 WHERE name = $2', [envelopeToQueryAmount, to])
+      .then(() => res.status(200).send(`Success. You have transferred ${amount} dollars from ${from} to ${to}`))
+      .catch(err => res.status(500).send('Error updating balances'));
+    
   }
   else {
-    res.status(409).send('Not enough money in the envelope');
+    res.status(400).send('One or both envelopes not found');
   }
 
 })
 
 //removes money from specific envelope and updates balance
-app.put('/envelopes', bodyParser.json(), (req, res) => {
-
-  let itemRequestedFound = envelopeArr.find((element) => {
-    if (element.name === req.body.name)
-      return element
-  })
-
-  let amount = req.body.amount;
-  if (itemRequestedFound) {
-    if ((itemRequestedFound.budget - amount) >= 0) {
-      itemRequestedFound.budget = itemRequestedFound.budget - amount;
-      res.status(201).send(`Success. You now have ${itemRequestedFound.budget} dollars in this envelope`);
-    }
-    else {
+app.put('/envelopes', bodyParser.json(), async(req, res) => { 
+  const { name, amount } = req.body;
+  const envelopeFound = await pool.query('SELECT * FROM envelopes WHERE name = $1', [name]);
+  if(envelopeFound.rowCount > 0) {
+    const currentBalance = envelopeFound.rows[0].balance;
+    if (currentBalance >= amount) {
+      const newBalance = currentBalance - amount;
+      pool.query('UPDATE envelopes SET balance = $1 WHERE name = $2', [newBalance, name])
+        .then(() => res.status(200).send(`Success. You now have ${newBalance} dollars in this envelope`))
+        .catch(err => res.status(500).send('Error updating balance'));
+    } else {
       res.status(409).send('Not enough money in the envelope');
     }
   }
-
   else {
-    res.status(400).send('Not Found');
+    res.status(400).send('Envelope not found');
   }
 })
 
-app.delete('/envelopes/:id', bodyParser.json(), (req, res) => {
-  let envelopeArrLength1 = envelopeArr.length
-  let userId = Number(req.params.id);
-  envelopeArr = envelopeArr.filter((Envelope) => Envelope.id !== userId);
-  let envelopeArrLength2 = envelopeArr.length
-  if(envelopeArrLength1 != envelopeArrLength2){ 
-    res.status(200).send('Deleted')
-  }
-  else{
-    res.status(400).send('Not Found');
-  }
-  
+app.delete('/envelopes/:id', bodyParser.json(), async(req, res) => {
+  const resultsFound = await pool.query('DELETE FROM envelopes WHERE id = $1', [req.params.id])
+  console.log(resultsFound);
+    if (resultsFound.rowCount > 0) {
+      res.status(200).send('Deleted');
+    }
+    else {
+      res.status(400).send('Not Found');
+    }
 })
 
 
